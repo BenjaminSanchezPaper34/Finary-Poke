@@ -8,7 +8,7 @@ const {
 } = require('@modelcontextprotocol/sdk/types.js');
 
 /**
- * Robust MCP SSE Server Implementation
+ * Robust MCP SSE Server Implementation for Vercel Serverless
  */
 
 const app = express();
@@ -62,6 +62,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 // Map to store active SSE transports by session ID
+// Note: In serverless environments, this in-memory map will only persist 
+// for the duration of the execution context's life.
 const transports = new Map();
 
 /**
@@ -70,32 +72,42 @@ const transports = new Map();
 app.get('/sse', async (req, res) => {
   console.log('New SSE connection requested');
   
-  // Set headers explicitly for SSE to ensure compatibility
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders();
-
-  // Create transport with the relative path for messages
-  const transport = new SSEServerTransport('/messages', res);
-  
-  // Store the transport instance for later message routing
-  transports.set(transport.sessionId, transport);
-  
-  // Handle connection closure
-  res.on('close', () => {
-    console.log(`SSE connection closed for session: ${transport.sessionId}`);
-    transports.delete(transport.sessionId);
-  });
-
   try {
+    // Set headers explicitly for SSE to ensure compatibility
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering on NGINX/Vercel
+    
+    // Check if flushHeaders exists (it should in Express)
+    if (typeof res.flushHeaders === 'function') {
+      res.flushHeaders();
+    }
+
+    // Create transport with the relative path for messages
+    const transport = new SSEServerTransport('/messages', res);
+    
+    // Store the transport instance for later message routing
+    transports.set(transport.sessionId, transport);
+    
+    // Handle connection closure
+    res.on('close', () => {
+      console.log(`SSE connection closed for session: ${transport.sessionId}`);
+      transports.delete(transport.sessionId);
+    });
+
+    res.on('error', (err) => {
+      console.error(`SSE response stream error for session ${transport.sessionId}:`, err);
+      transports.delete(transport.sessionId);
+    });
+
     // Connect the transport to the MCP server
     await server.connect(transport);
     console.log(`MCP Transport connected for session: ${transport.sessionId}`);
   } catch (error) {
-    console.error('Failed to connect MCP transport:', error);
+    console.error('Failed to connect MCP transport or initialize SSE:', error);
     if (!res.headersSent) {
-      res.status(500).send('Internal Server Error');
+      res.status(500).json({ error: 'Internal Server Error', message: error.message });
     }
   }
 });
@@ -115,26 +127,22 @@ app.post('/messages', express.json(), async (req, res) => {
     } catch (error) {
       console.error(`Error handling message for session ${sessionId}:`, error);
       if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to handle message' });
+        res.status(500).json({ error: 'Failed to handle message', message: error.message });
       }
     }
   } else {
     console.warn(`No active SSE session found for ID: ${sessionId}`);
-    res.status(404).send('Session not found');
+    res.status(404).json({ error: 'Session not found', sessionId });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-const serverInstance = app.listen(PORT, () => {
-  console.log(`MCP Server running on http://localhost:${PORT}`);
-  console.log(`SSE endpoint: http://localhost:${PORT}/sse`);
-  console.log(`Message endpoint: http://localhost:${PORT}/messages`);
-});
-
-// Handle graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
-  serverInstance.close(() => {
-    console.log('HTTP server closed');
+// For local development
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`MCP Server running on http://localhost:${PORT}`);
   });
-});
+}
+
+// Export the app for Vercel
+module.exports = app;
