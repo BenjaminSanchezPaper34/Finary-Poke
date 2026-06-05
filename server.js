@@ -8,17 +8,7 @@ const {
 } = require('@modelcontextprotocol/sdk/types.js');
 
 /**
- * Serverless-optimized MCP SSE Server for Vercel
- * 
- * FIXES:
- * 1. Global Error Monitoring: Captures crashes that otherwise show as generic 500s.
- * 2. Header Reliability: Improved header handling and flushing for Vercel/NGINX.
- * 3. Proactive Cleanup: Explicit session deletion on connection closure.
- * 
- * NOTE: In-memory Maps like 'transports' are instance-specific. 
- * If a POST /messages request hits a different Vercel instance than the 
- * original GET /sse, it will return a 404. For high-scale production, 
- * use Redis (Upstash) to share session state.
+ * MCP SSE Server optimized for persistent environments (Railway)
  */
 
 // --- Global Error Monitoring ---
@@ -120,14 +110,12 @@ app.post('/messages', express.json(), async (req, res) => {
     console.warn(`Session not found: ${sessionId}`);
     res.status(404).json({ 
       error: 'Session not found', 
-      message: 'The session may have expired or routed to a different server instance.' 
+      message: 'The session may have expired.' 
     });
   }
 });
 
-if (process.env.NODE_ENV !== 'production') {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => console.log(`Local server: http://localhost:${PORT}`));
-}
-
-module.exports = app;
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server listening on port ${PORT}`);
+});
