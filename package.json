@@ -1,0 +1,14 @@
+{
+  "name": "finary-poke-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server with SSE and Express for Finary-Poke",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.1",
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  }
+}
