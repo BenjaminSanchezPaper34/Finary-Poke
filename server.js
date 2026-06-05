@@ -9,7 +9,6 @@ const {
 
 const app = express();
 app.use(cors());
-app.use(express.json());
 
 const server = new Server(
   {
@@ -64,7 +63,9 @@ app.get('/sse', async (req, res) => {
   await server.connect(transport);
 });
 
-app.post('/messages', async (req, res) => {
+// The /messages endpoint needs express.json() middleware to parse the body
+// before calling handlePostMessage.
+app.post('/messages', express.json(), async (req, res) => {
   console.log('Received message:', req.body);
   if (transport) {
     await transport.handlePostMessage(req, res);
