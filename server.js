@@ -8,28 +8,37 @@ const {
 } = require('@modelcontextprotocol/sdk/types.js');
 
 /**
- * Robust MCP SSE Server Implementation for Vercel Serverless
+ * Serverless-optimized MCP SSE Server for Vercel
+ * 
+ * FIXES:
+ * 1. Global Error Monitoring: Captures crashes that otherwise show as generic 500s.
+ * 2. Header Reliability: Improved header handling and flushing for Vercel/NGINX.
+ * 3. Proactive Cleanup: Explicit session deletion on connection closure.
+ * 
+ * NOTE: In-memory Maps like 'transports' are instance-specific. 
+ * If a POST /messages request hits a different Vercel instance than the 
+ * original GET /sse, it will return a 404. For high-scale production, 
+ * use Redis (Upstash) to share session state.
  */
 
-const app = express();
+// --- Global Error Monitoring ---
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
-// Standard Express middleware
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception thrown:', err);
+});
+
+const app = express();
 app.use(cors());
 
-// Create MCP Server instance
+// MCP Server Setup
 const server = new Server(
-  {
-    name: 'finary-poke-server',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
+  { name: 'finary-poke-server', version: '1.0.0' },
+  { capabilities: { tools: {} } }
 );
 
-// Define tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
@@ -50,99 +59,75 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === 'get_finary_data') {
     return {
-      content: [
-        {
-          type: 'text',
-          text: `Fetching Finary data for account: ${request.params.arguments.account_id}`,
-        },
-      ],
+      content: [{ type: 'text', text: `Fetching Finary data for: ${request.params.arguments.account_id}` }],
     };
   }
   throw new Error('Tool not found');
 });
 
-// Map to store active SSE transports by session ID
-// Note: In serverless environments, this in-memory map will only persist 
-// for the duration of the execution context's life.
 const transports = new Map();
 
 /**
- * SSE endpoint: Establishes a long-running connection
+ * SSE endpoint
  */
 app.get('/sse', async (req, res) => {
-  console.log('New SSE connection requested');
+  console.log('New SSE connection');
   
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); 
+  
+  if (typeof res.flushHeaders === 'function') {
+    res.flushHeaders();
+  }
+
+  const transport = new SSEServerTransport('/messages', res);
+  transports.set(transport.sessionId, transport);
+  
+  res.on('close', () => {
+    console.log(`Closing session: ${transport.sessionId}`);
+    transports.delete(transport.sessionId);
+  });
+
   try {
-    // Set headers explicitly for SSE to ensure compatibility
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering on NGINX/Vercel
-    
-    // Check if flushHeaders exists (it should in Express)
-    if (typeof res.flushHeaders === 'function') {
-      res.flushHeaders();
-    }
-
-    // Create transport with the relative path for messages
-    const transport = new SSEServerTransport('/messages', res);
-    
-    // Store the transport instance for later message routing
-    transports.set(transport.sessionId, transport);
-    
-    // Handle connection closure
-    res.on('close', () => {
-      console.log(`SSE connection closed for session: ${transport.sessionId}`);
-      transports.delete(transport.sessionId);
-    });
-
-    res.on('error', (err) => {
-      console.error(`SSE response stream error for session ${transport.sessionId}:`, err);
-      transports.delete(transport.sessionId);
-    });
-
-    // Connect the transport to the MCP server
     await server.connect(transport);
-    console.log(`MCP Transport connected for session: ${transport.sessionId}`);
   } catch (error) {
-    console.error('Failed to connect MCP transport or initialize SSE:', error);
+    console.error('SSE Connection Error:', error);
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Internal Server Error', message: error.message });
+      res.status(500).json({ error: 'Internal Server Error' });
     }
   }
 });
 
 /**
- * Message endpoint: Receives POST requests for a specific session
+ * Message endpoint
  */
 app.post('/messages', express.json(), async (req, res) => {
   const sessionId = req.query.sessionId;
-  console.log(`Received message for session: ${sessionId}`);
-  
   const transport = transports.get(sessionId);
   
   if (transport) {
     try {
       await transport.handlePostMessage(req, res);
     } catch (error) {
-      console.error(`Error handling message for session ${sessionId}:`, error);
+      console.error(`Message Error (${sessionId}):`, error);
       if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to handle message', message: error.message });
+        res.status(500).json({ error: 'Failed to handle message' });
       }
     }
   } else {
-    console.warn(`No active SSE session found for ID: ${sessionId}`);
-    res.status(404).json({ error: 'Session not found', sessionId });
+    console.warn(`Session not found: ${sessionId}`);
+    res.status(404).json({ 
+      error: 'Session not found', 
+      message: 'The session may have expired or routed to a different server instance.' 
+    });
   }
 });
 
-// For local development
 if (process.env.NODE_ENV !== 'production') {
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`MCP Server running on http://localhost:${PORT}`);
-  });
+  app.listen(PORT, () => console.log(`Local server: http://localhost:${PORT}`));
 }
 
-// Export the app for Vercel
 module.exports = app;
