@@ -75,15 +75,21 @@ app.get('/sse', async (req, res) => {
   const transport = new SSEServerTransport('/messages', res);
   transports.set(transport.sessionId, transport);
   
-  res.on('close', () => {
+  res.on('close', async () => {
     console.log(`Closing session: ${transport.sessionId}`);
     transports.delete(transport.sessionId);
+    try {
+      await transport.close();
+    } catch (e) {
+      console.error('Error closing transport:', e);
+    }
   });
 
   try {
     await server.connect(transport);
   } catch (error) {
     console.error('SSE Connection Error:', error);
+    transports.delete(transport.sessionId);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Internal Server Error' });
     }
