@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const axios = require('axios');
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js');
 const { 
@@ -9,7 +10,83 @@ const {
 
 /**
  * MCP SSE Server optimized for persistent environments (Railway)
+ * Integrated with Finary API (Unofficial) via Clerk Auth
  */
+
+// --- Finary API Constants ---
+const API_ROOT = 'https://api.finary.com';
+const CLERK_ROOT = 'https://clerk.finary.com';
+
+/**
+ * Finary Client to manage Clerk session and authenticated requests
+ */
+class FinaryClient {
+  constructor(sessionId, cookies) {
+    this.sessionId = sessionId;
+    this.cookies = cookies;
+    this.jwt = null;
+  }
+
+  async refreshToken() {
+    console.log('Attempting to refresh Finary JWT via Clerk...');
+    if (!this.sessionId || !this.cookies) {
+      throw new Error('FINARY_CLERK_SESSION_ID or FINARY_CLERK_COOKIES environment variables are missing.');
+    }
+
+    try {
+      const response = await axios.post(
+        `${CLERK_ROOT}/v1/client/sessions/${this.sessionId}/tokens`,
+        {},
+        {
+          headers: {
+            'Cookie': this.cookies,
+            'Origin': 'https://app.finary.com',
+            'Referer': 'https://app.finary.com',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
+          }
+        }
+      );
+      this.jwt = response.data.jwt;
+      console.log('Finary JWT refreshed successfully');
+    } catch (error) {
+      console.error('Failed to refresh Finary token:', error.response?.data || error.message);
+      throw new Error(`Auth refresh failed: ${error.message}`);
+    }
+  }
+
+  async get(path, params = {}) {
+    if (!this.jwt) await this.refreshToken();
+    
+    try {
+      const response = await axios.get(`${API_ROOT}${path}`, {
+        params,
+        headers: { 
+          'Authorization': `Bearer ${this.jwt}`,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
+        }
+      });
+      return response.data;
+    } catch (error) {
+      // Retry once on 401
+      if (error.response?.status === 401) {
+        console.warn('401 Unauthorized, retrying after token refresh...');
+        await this.refreshToken();
+        const retryResponse = await axios.get(`${API_ROOT}${path}`, {
+          params,
+          headers: { 'Authorization': `Bearer ${this.jwt}` }
+        });
+        return retryResponse.data;
+      }
+      throw error;
+    }
+  }
+}
+
+// Global client instance
+const finaryClient = new FinaryClient(
+  process.env.FINARY_CLERK_SESSION_ID,
+  process.env.FINARY_CLERK_COOKIES
+);
 
 // --- Global Error Monitoring ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -33,26 +110,53 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
-        name: 'get_finary_data',
-        description: 'Fetch data from Finary account',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            account_id: { type: 'string' },
-          },
-        },
+        name: 'get_finary_portfolio',
+        description: 'Fetch the general portfolio summary (net worth, total gains, etc.)',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'get_finary_investments',
+        description: 'Fetch detailed investment holdings (stocks, funds, etc.)',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'get_finary_cryptos',
+        description: 'Fetch detailed crypto holdings',
+        inputSchema: { type: 'object', properties: {} },
       },
     ],
   };
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name === 'get_finary_data') {
+  const { name } = request.params;
+  
+  try {
+    let data;
+    switch (name) {
+      case 'get_finary_portfolio':
+        data = await finaryClient.get('/users/me/portfolio');
+        break;
+      case 'get_finary_investments':
+        data = await finaryClient.get('/users/me/portfolio/investments');
+        break;
+      case 'get_finary_cryptos':
+        data = await finaryClient.get('/users/me/portfolio/cryptos');
+        break;
+      default:
+        throw new Error('Tool not found');
+    }
+    
     return {
-      content: [{ type: 'text', text: `Fetching Finary data for: ${request.params.arguments.account_id}` }],
+      content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+    };
+  } catch (error) {
+    console.error(`Error executing tool ${name}:`, error.message);
+    return {
+      isError: true,
+      content: [{ type: 'text', text: `Failed to fetch data from Finary: ${error.message}` }],
     };
   }
-  throw new Error('Tool not found');
 });
 
 const transports = new Map();
